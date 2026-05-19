@@ -101,14 +101,45 @@ async function handleBeforeRequestHook(
     return jsonResponse({ verdict: true });
   }
 
+  const portkeyMetadataPatch = sortValue({
+    cryptowerk: {
+      request: {
+        retrievalId: requestSeal.retrievalId,
+        sha256: requestSeal.sha256,
+        verify: requestSeal.verify,
+        hashSource: requestSeal.hashSource,
+        hashAlgorithm: requestSeal.hashAlgorithm,
+        hashSerialization: requestSeal.hashSerialization,
+      },
+    },
+  }) as Record<string, unknown>;
+  const originalPortkeyMetadataObject = getPortkeyMetadataObject(requestContainer, payload.metadata);
+  const originalPortkeyMetadataHeader = stableStringify(originalPortkeyMetadataObject);
+  const transformedRequestContainer = appendPortkeyMetadata(
+    updateContainerMetadata(
+      requestContainer,
+      requestDocument,
+      buildRequestMetadata(requestMetadata, requestSeal),
+    ),
+    originalPortkeyMetadataObject,
+    portkeyMetadataPatch,
+  );
+  const transformedPortkeyMetadataHeader = getPortkeyMetadataHeaderValue(transformedRequestContainer);
+
+  console.log(JSON.stringify({
+    stage: "before-request-portkey-metadata",
+    inboundPayloadMetadata: payload.metadata ?? null,
+    inboundRequestMetadata: getContainerMetadata(requestContainer) ?? null,
+    inboundPortkeyHeaders: getPortkeyHeadersSnapshot(requestContainer),
+    originalXPortkeyMetadata: originalPortkeyMetadataHeader,
+    appendedPortkeyMetadataPatch: portkeyMetadataPatch,
+    transformedXPortkeyMetadata: transformedPortkeyMetadataHeader,
+  }));
+
   return jsonResponse({
     verdict: true,
     transformedData: {
-      request: updateContainerMetadata(
-        requestContainer,
-        requestDocument,
-        buildRequestMetadata(requestMetadata, requestSeal),
-      ),
+      request: transformedRequestContainer,
     },
   });
 }
@@ -242,7 +273,6 @@ function buildRequestMetadata(
 ): Record<string, unknown> {
   return {
     ...(baseMetadata ?? {}),
-    cryptowerkTest: "before-request-metadata-transform",
     verify: seal.verify,
     requestHashSource: seal.hashSource,
     requestHashAlgorithm: seal.hashAlgorithm,
@@ -272,7 +302,6 @@ function buildVisibleCryptowerkResponse(
   responseSeal: SealResult,
 ): Record<string, unknown> {
   return {
-    verify: responseSeal.verify,
     request: requestSeal
       ? {
           retrievalId: requestSeal.retrievalId,
@@ -313,6 +342,57 @@ function updateContainerMetadata(
         json,
         metadata,
       };
+}
+
+function appendPortkeyMetadata(
+  container: PortkeyDataContainer,
+  baseMetadata: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): PortkeyDataContainer {
+  const portkeyHeaders = isPlainObject(container.portkeyHeaders)
+    ? container.portkeyHeaders
+    : {};
+  const existingRawMetadata = asNonEmptyString(portkeyHeaders["x-portkey-metadata"]);
+  const existingMetadata = existingRawMetadata
+    ? parseJsonObject(existingRawMetadata)
+    : baseMetadata;
+  const mergedMetadata = deepMergeObjects(existingMetadata, patch);
+
+  return {
+    ...container,
+    portkeyHeaders: {
+      ...portkeyHeaders,
+      "x-portkey-metadata": stableStringify(mergedMetadata),
+    },
+  };
+}
+
+function getPortkeyMetadataHeaderValue(container: PortkeyDataContainer | null): string | undefined {
+  if (!container || !isPlainObject(container.portkeyHeaders)) {
+    return undefined;
+  }
+
+  return asNonEmptyString(container.portkeyHeaders["x-portkey-metadata"]);
+}
+
+function getPortkeyMetadataObject(
+  container: PortkeyDataContainer | null,
+  payloadMetadata: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+  const headerValue = getPortkeyMetadataHeaderValue(container);
+  if (headerValue) {
+    return parseJsonObject(headerValue);
+  }
+
+  return isPlainObject(payloadMetadata) ? payloadMetadata : {};
+}
+
+function getPortkeyHeadersSnapshot(
+  container: PortkeyDataContainer | null,
+): Record<string, unknown> | null {
+  return container && isPlainObject(container.portkeyHeaders)
+    ? container.portkeyHeaders
+    : null;
 }
 
 function getRequestSealFromMetadata(
@@ -496,6 +576,38 @@ function extractRetrievalId(data: CryptowerkRegisterResponse): string | null {
 
 function asNonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function parseJsonObject(value: string | undefined): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isPlainObject(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function deepMergeObjects(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+
+  for (const [key, patchValue] of Object.entries(patch)) {
+    const baseValue = result[key];
+
+    if (isPlainObject(baseValue) && isPlainObject(patchValue)) {
+      result[key] = deepMergeObjects(baseValue, patchValue);
+    } else {
+      result[key] = patchValue;
+    }
+  }
+
+  return result;
 }
 
 function jsonResponse(body: unknown): Response {
