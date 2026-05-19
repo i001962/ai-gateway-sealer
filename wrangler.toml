@@ -1,0 +1,9 @@
+name = "portkey-byog-guardrail"
+main = "src/index.ts"
+compatibility_date = "2026-05-18"
+
+[vars]
+CW_BASE_URL = "https://aiagent.cryptowerk.com/platform/API/v8"
+
+[observability]
+enabled = true
